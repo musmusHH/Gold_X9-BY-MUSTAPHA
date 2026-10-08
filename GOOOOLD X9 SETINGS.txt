@@ -1,0 +1,294 @@
+//+------------------------------------------------------------------+
+//|                                                 GOLD X9 V6.3.mq5 |
+//|                                  Copyright 2026, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "AIT CHIKH MUSTAPHA."
+#property link      "https://www.AIT CHIKH MUSTAPHA.com"
+#property strict
+#property version   "1.00"
+
+#include <Trade\Trade.mqh>
+
+CTrade         trade;
+COrderInfo     ordinfo;
+CPositionInfo  posinfo;
+
+enum enum_lotsizing
+  {
+   Manual_Lotsize = 0,                                                   //Fixed Lots
+   Tiered_Lotsizing = 1,                                                 // Tiered Lot Sizing
+   RiskScaleFactor = 2,                                                  //Risk Scaling Factor (%)
+  };
+
+input group " === TRADE SETUP === ";
+
+input int                InpMagic    =     647873;                            //EA Magic Number
+input string             TradeComment= "Gold X9 by AIT CHIKHMUSTAPHA";        //Comment for trades
+
+input group "=== MONEY MANAGEMENT / Lotsize Calculations === ";
+
+input enum_lotsizing     Lotsizing_Method = 1;                                  //Lotsize Calculation method
+input double             TieredLot        = 30;                                // Tiered Lot Sizing Risk Meter (1 - 100 Max)
+double             TieredLotEff ;                                        //Runtime: TieredLot clamped to valid 1-100 range
+input double             FixedLots        = 0.01;                                     // Fixed Lots
+input double             RiskScaling      = 1;                                //Risk Scaling Factor (%
+
+input group " === PROP AND ENTRY ADJUSTMENTS === ";
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+input double             AdjustEntry           = 0; // Adjust Entry (in points)
+input double             AdjustSL              = 0;    // Adjust SL (in points)
+input double             AdjustTP              = 0;       // Adjust TP (in points)
+input double             AdjustTrailSL         = 0;  // Adjust Trail SL (in points)
+input double             AdjustSalvageExit     = 0; // Adjust Salvage Exit (in points)
+input double             AdjustBreakEven       = 0;  // Adjust Breakeven (in points)
+
+input group " === Strategy Parameters === ";
+
+input ENUM_TIMEFRAMES      fractalTf       = PERIOD_H1;     // Fractal Detection Timeframe
+input ENUM_TIMEFRAMES      rescanTf        = PERIOD_M15;    // Entry Rescan Timeframe
+
+
+input int   fractalRight                   =5;// Fractal Right Bars
+input int   fractalLeft                    =5;// Fractal Left Bars
+input int   fractalMaxSearch               =200;// Fractal Max Search (bars)
+
+input int             maxPendingOrders      = 3;              // Max Pending Orders
+input int             pendingExpiryHours     = 15;             // Pending Order Expiration (Hours)
+
+input ENUM_TIMEFRAMES       exitScanTf        = PERIOD_M1;         // Position Management Scan Timeframe
+input int                   maxPositions       = 10;             // Max Open Positions
+
+input double         fractalMinDistPct        = 0.02;           // Fractal Min Clearance (% of price)
+input int             pendDedupDist           = 5.0;            // Pending Dedup Distance (points)  
+
+input double          buyEntryPct      = -0.08;          // Buy Entry Offset (% Price)
+input double          sellEntryPct     = -0.08;          // Sell Entry Offset (% Price)
+
+input double          slPct            = 2.0;            // Stop Loss (% Price)
+input double          tpPct          = 0.7;            // Take Profit (% Price)
+
+input double          trailPct        = 0.2;            // Trailing SL Distance (% Price)
+input double          trailMinProfitPct       = 0.2;            // Trailing SL Min Profit Trigger (% Price)
+input double          trailMaxSLPct            = 1.0;            // Trailing SL Max (% Price)
+
+input double          salvageTriggerPct      = 1.0;            // Salvage Trigger (% Price)
+input double          salvageExitPct             = 0.15;           // Salvage Exit Distance(% Price)
+
+input double          beTriggerPct    = 0.1;            // Break-Even Trigger (% Price)
+input double          beLockPct       = 0.025;          // Break-Even Lock Profit (% Price)
+input double          riskweight     = 0.055;          // Strategy Risk Weighting
+
+double           CurrSpread ;
+ENUM_TIMEFRAMES  FractalTf ;
+ENUM_TIMEFRAMES  RescanTf ;
+int              FractalRight ;
+int              FractalLeft ;
+int              FractalMaxSearch;
+int              MaxPendingOrders ;
+int              MaxPositions ;
+double           PendingDedupDist ;
+int              PendingExpiryHrs ;
+int              ActiveMagic ;
+ENUM_TIMEFRAMES  ExitScanTf ;
+int              SymDigits ;
+double           StopLevelDist ;
+double           PipFactor ;
+double           FreezeLevelDist ;
+string           ActiveComment;
+string           TradeSym;
+double           SymPoint ;
+
+
+int              DayswitcBufferMin =30;
+double           FractalMinDist ;
+double           BuyEntryOffset ;
+double           SellEntryOffset ;
+bool             Virtual_expiration =true;
+
+double           SLDist; 
+double           TPDist;
+double           TrailDist;
+double           TrailMinProfit;
+double           TrailMaxSL;
+double           TrailStep = 0.1;
+double           SalvageExitDist;
+double           salvageTrigger;
+double           BeTrigger;
+double           BeLockDist;  
+
+double           MaxLotCap = 100.0;
+double           WeightedRiskDivisor = 1.0;
+
+double           LastSwingHigh = 0.0;   
+double            LastSwingLow = 0.0;  
+double           VirtualSL = 0.0;         
+
+double           VirtualSLStore[20] [2];      
+double           OrderPriceMap [100] [2];      
+int              VirtualSLStoreSize = 20;          
+
+double            StrategyLots = 0.01;                   
+int               LastTradeTicket = 0;                     
+int               PendingExpirySeconds ;                          
+
+double            SwingLow = 0.0;                    
+double            SwingHigh = 0.0;                                  
+
+int                LastHour = 0;                           
+datetime           PendingExpiry = 0;                            
+int                PerStrategyRescanBars = 0;                                
+int                PerStrategyPendingRescanBars = 0;                         
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+  int            vslResetOuterIdx;
+  int            vslResetInnerIdx;
+  MqlDateTime    nowDt;
+
+TieredLotEff = TieredLot;
+if ( TieredLotEff>100.0)      TieredLotEff = 100.0;
+if ( TieredLotEff <= 0.0)    TieredLotEff = 1.0;    
+  
+ActiveComment = TradeComment ;
+ActiveMagic = InpMagic ;
+TradeSym = Symbol() ;
+SymPoint = SymbolInfoDouble(TradeSym,SYMBOL_POINT) ;
+
+PipFactor = SymPoint ;
+if(((double)SymbolInfoInteger(TradeSym,SYMBOL_DIGITS) == 3.0||(double)SymbolInfoInteger(TradeSym, SYMBOL_DIGITS) == 5.0 ) ){
+PipFactor = SymPoint * 10.0 ;
+}
+if ( SymbolInfoInteger(TradeSym, SYMBOL_DIGITS) == 1 ){
+PipFactor = SymPoint / 10.0 ;
+}
+
+SymDigits = (int)SymbolInfoInteger(TradeSym, SYMBOL_DIGITS) ;
+CurrSpread = SymbolInfoDouble(TradeSym,SYMBOL_ASK) - SymbolInfoDouble(TradeSym, SYMBOL_BID) ;
+StopLevelDist = (double)SymbolInfoInteger(TradeSym, SYMBOL_TRADE_STOPS_LEVEL) * SymPoint ;
+FreezeLevelDist = (double)SymbolInfoInteger(TradeSym, SYMBOL_TRADE_FREEZE_LEVEL) * SymPoint ;  
+  
+
+   FractalTf        = fractalTf;
+   RescanTf         = rescanTf;
+   FractalRight     = fractalRight;
+   FractalLeft      = fractalLeft;
+   FractalMaxSearch = fractalMaxSearch;
+   MaxPendingOrders = maxPendingOrders;   // fixed
+   PendingDedupDist = pendDedupDist;
+   PendingExpiryHrs = pendingExpiryHours; // fixed
+   ExitScanTf       = exitScanTf;
+   MaxPositions     = maxPositions;
+   
+   ActivateStrategyContext();
+
+if ( SLDist <= 0.0 ){
+SLDist = 1.0 ;
+
+if ( TPDist <= 0.0 ){
+TPDist = 1.0 ;
+}
+ if ( BeLockDist>BeTrigger ){
+BeLockDist = BeTrigger / 2 ;
+
+if ( TrailDist != 0.0 && TrailDist<FreezeLevelDist / PipFactor ){
+TrailDist = FreezeLevelDist / PipFactor ; 
+  }
+  if ( SLDist<StopLevelDist * 2.0 / PipFactor ){
+SLDist = StopLevelDist * 2.0 / PipFactor ;
+
+if ( TPDist<StopLevelDist * 2.0 / PipFactor ){
+TPDist = StopLevelDist * 2.0 / PipFactor ;
+
+if ( FractalMinDist<StopLevelDist * 2.0 / PipFactor ){
+FractalMinDist = StopLevelDist * 2.0 / PipFactor ;
+}
+
+if ( FractalRight < 1 )<
+FractalRight = 1 ;
+
+if ( FractalLeft < 1 ){
+FractalLeft = 1 ;
+
+if ( FractalMinDist<0.1 ){
+FractalMinDist = 0.1;
+}
+PendingExpirySeconds=PendingExpiryHrs| * 60 * 60;
+if ( PendingExpiryHrs >0){
+PendingExpiry=TimeCurrent() + PendingExpirySeconds;
+
+elsef
+PendingExpiry = 0 ;
+
+if ( Virtual_expiration ){
+PendingExpiry = 0 ;
+}
+
+
+FindSwingPoint(FractalTf,true);
+FindSwingPoint(FractalTf, false);
+LastSwingHigh = NormalizeDouble(SwingHigh,SymDigits) ;
+LastSwingLow = NormalizeDouble(SwingLow,SymDigits) ;
+
+FreezeLevelDist = (double)SymbolInfoInteger(TradeSym,SYMBOL_TRADE_FREEZE_LEVEL) * SymPoint ;
+VirtualSL = 0.0 ;
+
+if ( MaxLot|ap>SymbolInfoDouble(TradeSym, SYMBOL_VOLUME_MAX) ){
+MaxLotCap = SymbolInfoDouble(TradeSym, SYMBOL_VOLUME_MAX) ;
+}
+for (vslResetOuterIdx = 0 ; vslResetOuterIdx < VirtualSLStoreSize ; vslResetOuterIdx ++){
+for (vslResetInnerIdx = 0 ; vslResetInnerIdx < 2 ; vslResetInnerIdx ++){
+VirtualSLStore[vslResetOuterIdx][vslResetInnerIdx] = 0.0;
+}
+TimeToStruct(TimeCurrent(),nowDt);
+LastHour = nowDt.hour ;
+
+PerStrategyPendingRescanBars = 0;
+PerStrategyRescanBars = 0;
+
+
+
+   return(INIT_SUCCEEDED);
+  }
+
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+
+  }
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+
+
+
+  }
+
+//+------------------------------------------------------------------+
