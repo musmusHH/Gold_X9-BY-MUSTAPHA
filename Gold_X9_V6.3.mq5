@@ -67,7 +67,7 @@ input group " === PROP FIRM SAFETY === "
 input double   DailyDrawdownCapPct = 2.5;    // Daily equity drawdown hard stop (%): closes all positions
 input double   MaxDrawdownCapPct   = 8.0;    // Peak-to-trough equity drawdown hard stop (%): halts EA
 input bool     MaxDDResetsDaily    = true;   // Max-DD halt lifts at the next trading day (peak reset); false = halt until restart
-input double   MaxTotalRiskPct     = 3.0;    // Max money at risk on open positions + pending orders (% of balance)
+input double   MaxTotalRiskPct     = 0.0;    // Max money at risk on open positions + pending orders (% of balance). 0 = off
 
 input group " === PROP AND ENTRY ADJUSTMENTS (points) === "
 input double   AdjustEntry       = 0;        // Adjust Entry (+ = pending price moves up)
@@ -616,11 +616,13 @@ void TryPlaceStop(const int idx, const bool isBuy, const double swingLevel, cons
    if(lots <= 0.0) return;
 
    // Total open-risk cap: positions + pending orders (this order included) may not exceed MaxTotalRiskPct
-   double newRisk = RiskOfOrder(otype, lots, entry, sl);
-   double capMoney = AccountInfoDouble(ACCOUNT_BALANCE) * MaxTotalRiskPct / 100.0;
-   double openRisk = OpenRiskMoney();
-   if(newRisk < 0.0 || openRisk + newRisk > capMoney)
+   if(MaxTotalRiskPct > 0.0)
      {
+      double newRisk = RiskOfOrder(otype, lots, entry, sl);
+      double capMoney = AccountInfoDouble(ACCOUNT_BALANCE) * MaxTotalRiskPct / 100.0;
+      double openRisk = OpenRiskMoney();
+      if(newRisk < 0.0 || openRisk + newRisk > capMoney)
+        {
       if(g_riskSkipDayKey != g_dayKey)
         {
          g_riskSkipDayKey = g_dayKey;
@@ -628,6 +630,7 @@ void TryPlaceStop(const int idx, const bool isBuy, const double swingLevel, cons
                             openRisk, newRisk, capMoney, MaxTotalRiskPct));
         }
       return;
+     }
      }
 
    // Max pending orders: replace the worst-priced one only if the new order is superior
