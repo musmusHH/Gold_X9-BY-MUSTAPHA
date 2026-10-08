@@ -64,7 +64,8 @@ input bool     SmallAccountMode   = true;   // Trade the minimum lot and tighten
 input double   SmallRiskPct       = 1.0;    // Max loss per trade (% of balance) when SmallAccountMode is on
 
 input group " === PROP FIRM SAFETY === "
-input double   DailyDrawdownCapPct = 2.5;    // Daily equity drawdown hard stop (%): closes all positions
+input bool     DailyDDHalt        = false;  // Daily equity DD halt: closes all positions and pauses until next day (off = disabled)
+input double   DailyDrawdownCapPct = 2.5;    // Daily equity drawdown level for the halt above (%)
 input double   MaxDrawdownCapPct   = 8.0;    // Peak-to-trough equity drawdown hard stop (%): halts EA
 input bool     MaxDDResetsDaily    = true;   // Max-DD halt lifts at the next trading day (peak reset); false = halt until restart
 input double   MaxTotalRiskPct     = 0.0;    // Max money at risk on open positions + pending orders (% of balance). 0 = off
@@ -827,7 +828,7 @@ void UpdateRiskGuards()
      }
 
    // Daily equity drawdown hard stop: close everything, no trading until next day
-   if(!g_dayHalt && g_dayStartEq > 0.0)
+   if(DailyDDHalt && !g_dayHalt && g_dayStartEq > 0.0)
      {
       double ddDay = (g_dayStartEq - eq) / g_dayStartEq * 100.0;
       if(ddDay > DailyDrawdownCapPct)
