@@ -51,7 +51,7 @@ input string   TradeComment   = "Gold X9 by AIT CHIKHMUSTAPHA";  // Comment for 
 input int      InpSlippage    = 30;                              // Max slippage (points)
 
 input group "=== MONEY MANAGEMENT / Lotsize Calculations === "
-input ENUM_LOT_METHOD Lotsizing_Method  = LOT_TIERED;   // Lotsize calculation method
+input ENUM_LOT_METHOD Lotsizing_Method  = LOT_FIXED;    // Lotsize calculation method (LOT_FIXED = MQ4 behaviour)
 input double   TieredLot          = 30;      // Tiered Lot Sizing Risk Meter (1 - 100)
 input double   TieredMaxRiskPct   = 5.0;     // Risk % of balance per trade at meter 100 (Tiered only)
 input double   FixedLots          = 0.01;    // Fixed Lots
@@ -60,7 +60,7 @@ input bool     EnableRandomizer   = true;    // Random +/- 0.1-0.3 point micro-o
 input bool     VerboseLog         = false; // Print daily-reset messages to the Experts log
 
 input group " === SMALL ACCOUNT MODE (e.g. $200 on Raw Spread) === "
-input bool     SmallAccountMode   = true;   // Trade the minimum lot and tighten the SL to the risk budget below
+input bool     SmallAccountMode   = false;  // Trade the minimum lot and tighten the SL to the risk budget below (off = full stop-loss)
 input double   SmallRiskPct       = 1.0;    // Max loss per trade (% of balance) when SmallAccountMode is on
 
 input group " === PROP FIRM SAFETY === "
