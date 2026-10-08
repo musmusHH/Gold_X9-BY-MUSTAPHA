@@ -934,31 +934,22 @@ void DashCreate()
    ChartRedraw(0);
   }
 
-// Recalculates every value on the panel
-void DashUpdate()
+// Closed-trade statistics are cached. They are rebuilt only after a trade event or a new day,
+// because reading the whole history is slow in the Strategy Tester.
+double   g_cPL[STRATEGY_COUNT];
+int      g_cTrades[STRATEGY_COUNT];
+double   g_cTotalPL = 0.0;
+int      g_cRecent  = 0;
+bool     g_histDirty = true;
+int      g_histDay   = 0;
+
+void DashRefreshHistory()
   {
-   double openPL = 0.0;
-   double openLots[STRATEGY_COUNT];
-   double closedPL[STRATEGY_COUNT];
-   int    trades[STRATEGY_COUNT];
-   ArrayInitialize(openLots, 0.0);
-   ArrayInitialize(closedPL, 0.0);
-   ArrayInitialize(trades, 0);
+   ArrayInitialize(g_cPL, 0.0);
+   ArrayInitialize(g_cTrades, 0);
+   g_cTotalPL = 0.0;
+   g_cRecent  = 0;
 
-   // Open positions of this EA on this symbol
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong t = PositionGetTicket(i);
-      if(t == 0) continue;
-      if(!IsEAPosition()) continue;
-      int idx = (int)(PositionGetInteger(POSITION_MAGIC) - (long)InpMagic);
-      openLots[idx] += PositionGetDouble(POSITION_VOLUME);
-      openPL += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-     }
-
-   // Closed deals of this EA: trade counts, closed P/L, and trade frequency (last 7 days)
-   double totalPL = 0.0;
-   int    recentTrades = 0;
    datetime now = TimeCurrent();
    if(HistorySelect(0, now))
      {
@@ -975,22 +966,41 @@ void DashUpdate()
          double pl = HistoryDealGetDouble(tk, DEAL_PROFIT)
                    + HistoryDealGetDouble(tk, DEAL_COMMISSION)
                    + HistoryDealGetDouble(tk, DEAL_SWAP);
-         closedPL[idx] += pl;
-         totalPL += pl;
+         g_cPL[idx] += pl;
+         g_cTotalPL += pl;
 
          long entry = HistoryDealGetInteger(tk, DEAL_ENTRY);
          if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
            {
-            trades[idx]++;
-            if(now - (datetime)HistoryDealGetInteger(tk, DEAL_TIME) <= 7 * 86400) recentTrades++;
+            g_cTrades[idx]++;
+            if(now - (datetime)HistoryDealGetInteger(tk, DEAL_TIME) <= 7 * 86400) g_cRecent++;
            }
         }
      }
+   g_histDirty = false;
+   g_histDay   = g_dayKey;
+  }
 
-   double perDay = recentTrades / 7.0;
+// Draws the panel. Open positions are read live; closed stats come from the cache.
+void DashRender()
+  {
+   double openPL = 0.0;
+   double openLots[STRATEGY_COUNT];
+   ArrayInitialize(openLots, 0.0);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0) continue;
+      if(!IsEAPosition()) continue;
+      int idx = (int)(PositionGetInteger(POSITION_MAGIC) - (long)InpMagic);
+      openLots[idx] += PositionGetDouble(POSITION_VOLUME);
+      openPL += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+     }
+
+   double perDay = g_cRecent / 7.0;
    string freq = (perDay < 1.0) ? "Low" : (perDay <= 5.0 ? "Moderate" : "High");
 
-   // Status
    bool anyOn = false;
    for(int i = 0; i < STRATEGY_COUNT; i++)
       if(g_cfg[i].enabled) anyOn = true;
@@ -1006,20 +1016,19 @@ void DashUpdate()
    DashSet(DASH_PREFIX + "V3", StringFormat("%.1f%%", MaxDrawdownCapPct), clrOrange);
    DashSet(DASH_PREFIX + "V4", StringFormat("%.1f%%", g_worstDDPct), clrWhite);
    DashSet(DASH_PREFIX + "V5", StringFormat("%.2f", openPL), openPL >= 0.0 ? clrLime : clrTomato);
-   DashSet(DASH_PREFIX + "V6", StringFormat("%.2f", totalPL), totalPL >= 0.0 ? clrLime : clrTomato);
+   DashSet(DASH_PREFIX + "V6", StringFormat("%.2f", g_cTotalPL), g_cTotalPL >= 0.0 ? clrLime : clrTomato);
 
-   // Per-strategy table and totals
    double sumClosed = 0.0, sumLots = 0.0;
    int    sumTrades = 0;
    for(int i = 0; i < STRATEGY_COUNT; i++)
      {
-      double perTrd = (trades[i] > 0) ? closedPL[i] / trades[i] : 0.0;
-      color  clr = g_cfg[i].enabled ? (closedPL[i] < 0.0 ? clrTomato : clrWhite) : clrGray;
+      double perTrd = (g_cTrades[i] > 0) ? g_cPL[i] / g_cTrades[i] : 0.0;
+      color  clr = g_cfg[i].enabled ? (g_cPL[i] < 0.0 ? clrTomato : clrWhite) : clrGray;
       DashSet(DASH_PREFIX + "T" + IntegerToString(i),
               StringFormat("%-11s%6d%10.2f%9.2f%6.2f", "Strategy " + IntegerToString(i + 1),
-                           trades[i], closedPL[i], perTrd, openLots[i]), clr);
-      sumTrades += trades[i];
-      sumClosed += closedPL[i];
+                           g_cTrades[i], g_cPL[i], perTrd, openLots[i]), clr);
+      sumTrades += g_cTrades[i];
+      sumClosed += g_cPL[i];
       sumLots   += openLots[i];
      }
    double totPerTrd = (sumTrades > 0) ? sumClosed / sumTrades : 0.0;
@@ -1027,6 +1036,18 @@ void DashUpdate()
            StringFormat("%-11s%6d%10.2f%9.2f%6.2f", "Total", sumTrades, sumClosed, totPerTrd, sumLots),
            clrWhite);
    ChartRedraw(0);
+  }
+
+void DashUpdate()
+  {
+   if(g_histDirty || g_histDay != g_dayKey) DashRefreshHistory();
+   DashRender();
+  }
+
+// Any trade event (open, close, modify, cancel) means the closed-trade cache must be rebuilt
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+  {
+   g_histDirty = true;
   }
 
 int OnInit()
@@ -1115,20 +1136,20 @@ void OnDeinit(const int reason)
 void OnTick()
   {
    UpdateRiskGuards();
-   ExpirePendingOrders();
 
    bool trading = (!g_dayHalt && !g_maxDDHalt);
 
    // Daily stop: keep retrying the close-all until the account is flat (a close can fail on a busy server)
    if(g_dayHalt) CloseAllEA();
 
-   // Position management runs on each new bar of the exit-scan timeframe
+   // Once per bar of the exit-scan timeframe: position management, pending expiry, panel
    datetime exitBar = iTime(_Symbol, exitScanTf, 0);
    bool newExitBar = (exitBar != 0 && exitBar != g_lastExitBar);
    if(newExitBar)
      {
       g_lastExitBar = exitBar;
       ManagePositions();
+      ExpirePendingOrders();
      }
 
    // Entry rescan runs on each new bar of the rescan timeframe
@@ -1153,15 +1174,13 @@ void OnTick()
          PlaceOrders(i);
      }
 
-   if(ShowDashboard && TimeCurrent() - g_dashLast >= 1)
-     {
-      g_dashLast = TimeCurrent();
+   if(ShowDashboard && (newExitBar || g_histDirty))
       DashUpdate();
-     }
   }
 
+// Live refresh of open P/L between bars (live trading only; the tester skips timers)
 void OnTimer()
   {
-   if(ShowDashboard) DashUpdate();
+   if(ShowDashboard) DashRender();
   }
 //+------------------------------------------------------------------+
