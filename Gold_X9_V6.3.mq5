@@ -66,6 +66,8 @@ input double   SmallRiskPct       = 1.0;    // Max loss per trade (% of balance)
 input group " === PROP FIRM SAFETY === "
 input double   DailyDrawdownCapPct = 2.5;    // Daily equity drawdown hard stop (%): closes all positions
 input double   MaxDrawdownCapPct   = 8.0;    // Peak-to-trough equity drawdown hard stop (%): halts EA
+input bool     MaxDDResetsDaily    = true;   // Max-DD halt lifts at the next trading day (peak reset); false = halt until restart
+input double   MaxTotalRiskPct     = 3.0;    // Max money at risk on open positions + pending orders (% of balance)
 
 input group " === PROP AND ENTRY ADJUSTMENTS (points) === "
 input double   AdjustEntry       = 0;        // Adjust Entry (+ = pending price moves up)
@@ -171,6 +173,7 @@ bool     g_dayHalt       = false; // daily stop hit: no trading until next day
 bool     g_maxDDHalt     = false; // max drawdown hit: EA halted
 
 datetime g_lastRescanBar = 0;
+int      g_riskSkipDayKey = 0;  // day on which an open-risk skip was last logged
 int      g_lotSkipDayKey = 0;   // day on which a "lot below minimum" skip was last logged
 datetime g_lastExitBar   = 0;
 
@@ -261,6 +264,45 @@ bool LossAtPrice(const ENUM_ORDER_TYPE otype, const double vol, const double ent
    if(!OrderCalcProfit(otype, _Symbol, vol, entry, sl, p)) return false;
    loss = MathAbs(p);
    return true;
+  }
+
+// Money lost if 'sl' is hit (0 when the stop is at or beyond the entry). Returns -1 if the broker calc fails.
+double RiskOfOrder(const ENUM_ORDER_TYPE otype, const double vol, const double entry, const double sl)
+  {
+   if(sl <= 0.0 || vol <= 0.0) return 0.0;
+   double p = 0.0;
+   if(!OrderCalcProfit(otype, _Symbol, vol, entry, sl, p)) return -1.0;
+   return MathMax(0.0, -p);
+  }
+
+// Total money at risk on EA positions and EA pending orders. Returns a huge number if any calc fails (blocks trading).
+double OpenRiskMoney()
+  {
+   double total = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0) continue;
+      if(!IsEAPosition()) continue;
+      bool isBuy = ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double r = RiskOfOrder(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, PositionGetDouble(POSITION_VOLUME),
+                             PositionGetDouble(POSITION_PRICE_OPEN), PositionGetDouble(POSITION_SL));
+      if(r < 0.0) return 1e18;
+      total += r;
+     }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(t == 0) continue;
+      if(!IsEAOrder()) continue;
+      ENUM_ORDER_TYPE ot = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      bool isBuy = (ot == ORDER_TYPE_BUY_STOP || ot == ORDER_TYPE_BUY_LIMIT || ot == ORDER_TYPE_BUY_STOP_LIMIT);
+      double r = RiskOfOrder(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, OrderGetDouble(ORDER_VOLUME_CURRENT),
+                             OrderGetDouble(ORDER_PRICE_OPEN), OrderGetDouble(ORDER_SL));
+      if(r < 0.0) return 1e18;
+      total += r;
+     }
+   return total;
   }
 
 // Random micro-offset in price units: +/- (0.1 .. 0.3) points
@@ -529,23 +571,6 @@ void TryPlaceStop(const int idx, const bool isBuy, const double swingLevel, cons
    // Duplicate guard (DuplicatePointGap)
    if(HasNearPending(idx, side, entry, pendDedupDist * _Point)) return;
 
-   // Max pending orders: replace the worst-priced one only if the new order is superior
-   int    pendCount = 0;
-   double worstPx   = 0.0;
-   ulong  worstTk   = 0;
-   PendingStats(idx, side, pendCount, worstPx, worstTk);
-   if(pendCount >= maxPendingOrders)
-     {
-      if(worstTk == 0) return;
-      bool superior = isBuy ? (entry < worstPx) : (entry > worstPx);
-      if(!superior) return;
-      if(!g_trade.OrderDelete(worstTk))
-        {
-         Print("Gold X9: could not replace worst pending order #", worstTk, " - ", g_trade.ResultRetcodeDescription());
-         return;
-        }
-     }
-
    // Stop loss and take profit as percentages of the entry price
    double slDist = entry * c.stopLossPct / 100.0 + AdjustSL * _Point;
    double tpDist = entry * c.takeProfitPct / 100.0 + AdjustTP * _Point;
@@ -584,6 +609,39 @@ void TryPlaceStop(const int idx, const bool isBuy, const double swingLevel, cons
       lots = CalcLots(otype, entry, sl, CalcWeight(idx));
      }
    if(lots <= 0.0) return;
+
+   // Total open-risk cap: positions + pending orders (this order included) may not exceed MaxTotalRiskPct
+   double newRisk = RiskOfOrder(otype, lots, entry, sl);
+   double capMoney = AccountInfoDouble(ACCOUNT_BALANCE) * MaxTotalRiskPct / 100.0;
+   double openRisk = OpenRiskMoney();
+   if(newRisk < 0.0 || openRisk + newRisk > capMoney)
+     {
+      if(g_riskSkipDayKey != g_dayKey)
+        {
+         g_riskSkipDayKey = g_dayKey;
+         Print(StringFormat("Gold X9: order skipped. Open risk %.2f + new %.2f would exceed the cap %.2f (%.1f%% of balance).",
+                            openRisk, newRisk, capMoney, MaxTotalRiskPct));
+        }
+      return;
+     }
+
+   // Max pending orders: replace the worst-priced one only if the new order is superior
+   int    pendCount = 0;
+   double worstPx   = 0.0;
+   ulong  worstTk   = 0;
+   PendingStats(idx, side, pendCount, worstPx, worstTk);
+   if(pendCount >= maxPendingOrders)
+     {
+      if(worstTk == 0) return;
+      bool superior = isBuy ? (entry < worstPx) : (entry > worstPx);
+      if(!superior) return;
+      if(!g_trade.OrderDelete(worstTk))
+        {
+         Print("Gold X9: could not replace worst pending order #", worstTk, " - ", g_trade.ResultRetcodeDescription());
+         return;
+        }
+     }
+
 
    g_trade.SetExpertMagicNumber((ulong)c.magicNumber);
    string cmt = StringFormat("%s S%d", TradeComment, c.strategyId);
@@ -743,6 +801,12 @@ void UpdateRiskGuards()
       g_dayKey     = key;
       g_dayStartEq = eq;
       g_dayHalt    = false;
+      if(MaxDDResetsDaily && g_maxDDHalt)
+        {
+         g_maxDDHalt  = false;
+         g_peakEquity = eq;      // measure the next drawdown from today's equity
+         Print("Gold X9: max-drawdown halt lifted for the new trading day.");
+        }
       if(VerboseLog)
          Print("Gold X9: new trading day, daily equity reference reset to ", DoubleToString(eq, 2));
      }
@@ -767,7 +831,8 @@ void UpdateRiskGuards()
       double ddMax = (g_peakEquity - eq) / g_peakEquity * 100.0;
       if(ddMax > MaxDrawdownCapPct)
         {
-         Print(StringFormat("Gold X9: max drawdown %.2f%% > %.2f%%. EA halted.", ddMax, MaxDrawdownCapPct));
+         Print(StringFormat("Gold X9: max drawdown %.2f%% > %.2f%%. EA halted%s.", ddMax, MaxDrawdownCapPct,
+                            MaxDDResetsDaily ? " until the next trading day" : " until restart"));
          g_maxDDHalt = true;
          DeletePendingsEA();
         }
