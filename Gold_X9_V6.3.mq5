@@ -789,6 +789,9 @@ void OnTick()
 
    bool trading = (!g_dayHalt && !g_maxDDHalt);
 
+   // Daily stop: keep retrying the close-all until the account is flat (a close can fail on a busy server)
+   if(g_dayHalt) CloseAllEA();
+
    // Position management runs on each new bar of the exit-scan timeframe
    datetime exitBar = iTime(_Symbol, exitScanTf, 0);
    bool newExitBar = (exitBar != 0 && exitBar != g_lastExitBar);
