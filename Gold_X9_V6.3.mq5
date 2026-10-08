@@ -55,6 +55,7 @@ input double   TieredMaxRiskPct   = 5.0;     // Risk % of balance per trade at m
 input double   FixedLots          = 0.01;    // Fixed Lots
 input double   RiskScaling        = 1.0;     // Risk Scaling Factor (% of balance per trade, Risk % mode)
 input bool     EnableRandomizer   = true;    // Random +/- 0.1-0.3 point micro-offsets (prop firm)
+input bool     VerboseLog         = false; // Print daily-reset messages to the Experts log
 
 input group " === PROP FIRM SAFETY === "
 input double   DailyDrawdownCapPct = 2.5;    // Daily equity drawdown hard stop (%): closes all positions
@@ -164,6 +165,7 @@ bool     g_dayHalt       = false; // daily stop hit: no trading until next day
 bool     g_maxDDHalt     = false; // max drawdown hit: EA halted
 
 datetime g_lastRescanBar = 0;
+int      g_lotSkipDayKey = 0;   // day on which a "lot below minimum" skip was last logged
 datetime g_lastExitBar   = 0;
 
 //+------------------------------------------------------------------+
@@ -440,6 +442,18 @@ double CalcLots(const ENUM_ORDER_TYPE otype, const double entry, const double sl
       double lossAt1Lot = MathAbs(profitAt1Lot);
       if(lossAt1Lot <= 0.0 || riskMoney <= 0.0) return 0.0;
       lots = riskMoney / lossAt1Lot;
+
+      // Balance needed for the requested risk to reach the minimum lot
+      double minLotRisk = minLot * lossAt1Lot;
+      if(lots < minLot && g_lotSkipDayKey != g_dayKey)
+        {
+         g_lotSkipDayKey = g_dayKey;
+         Print(StringFormat("Gold X9: trade skipped. Risk-based lot %.5f is below the minimum %.2f. "
+                            "At %.2f%% risk and this stop distance, the minimum lot needs a balance of about %.0f USD "
+                            "(current balance %.2f). Raise the balance, raise the risk %%, or use Fixed Lots.",
+                            lots, minLot, riskPct, minLotRisk / (riskPct / 100.0),
+                            AccountInfoDouble(ACCOUNT_BALANCE)));
+        }
      }
 
    lots = MathMin(lots, maxLot);
@@ -685,7 +699,8 @@ void UpdateRiskGuards()
       g_dayKey     = key;
       g_dayStartEq = eq;
       g_dayHalt    = false;
-      Print("Gold X9: new trading day, daily equity reference reset to ", DoubleToString(eq, 2));
+      if(VerboseLog)
+         Print("Gold X9: new trading day, daily equity reference reset to ", DoubleToString(eq, 2));
      }
 
    if(eq > g_peakEquity) g_peakEquity = eq;
