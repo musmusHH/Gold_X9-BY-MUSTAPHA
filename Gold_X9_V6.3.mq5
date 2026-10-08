@@ -106,6 +106,9 @@ input double   beTriggerPct           = 0.1;        // Break-even trigger profit
 input double   beLockPct              = 0.025;      // Break-even lock profit (% of price)
 input double   riskweight             = 0.055;      // Strategy risk weighting (base for all sub-strategies)
 
+input group " === DASHBOARD === "
+input bool     ShowDashboard      = true;   // Show the on-chart status panel
+
 input group " === SUB-STRATEGY SWITCHES === "
 input bool     Strategy1_Enabled      = true;
 input bool     Strategy2_Enabled      = true;
@@ -171,6 +174,8 @@ double   g_dayStartEq    = 0.0;
 int      g_dayKey        = 0;
 bool     g_dayHalt       = false; // daily stop hit: no trading until next day
 bool     g_maxDDHalt     = false; // max drawdown hit: EA halted
+double   g_worstDDPct    = 0.0;   // largest equity drawdown seen so far (%), shown on the panel
+datetime g_dashLast      = 0;     // last panel refresh
 
 datetime g_lastRescanBar = 0;
 int      g_riskSkipDayKey = 0;  // day on which an open-risk skip was last logged
@@ -812,6 +817,11 @@ void UpdateRiskGuards()
      }
 
    if(eq > g_peakEquity) g_peakEquity = eq;
+   if(g_peakEquity > 0.0)
+     {
+      double ddNow = (g_peakEquity - eq) / g_peakEquity * 100.0;
+      if(ddNow > g_worstDDPct) g_worstDDPct = ddNow;
+     }
 
    // Daily equity drawdown hard stop: close everything, no trading until next day
    if(!g_dayHalt && g_dayStartEq > 0.0)
@@ -842,6 +852,179 @@ void UpdateRiskGuards()
 //+------------------------------------------------------------------+
 //| Init / Deinit / Tick                                             |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| On-chart dashboard                                               |
+//+------------------------------------------------------------------+
+#define DASH_PREFIX "GX9_"
+#define DASH_X0     10
+#define DASH_Y0     20
+#define DASH_FONT   "Consolas"
+#define DASH_SIZE   9
+
+int DashY(const int row)
+  {
+   return DASH_Y0 + 12 + row * 16;
+  }
+
+void DashLabel(const string name, const int x, const int y, const int size, const color clr)
+  {
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, size);
+   ObjectSetString(0, name, OBJPROP_FONT, DASH_FONT);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+  }
+
+void DashSet(const string name, const string text, const color clr)
+  {
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+  }
+
+// Creates the panel background and all labels (called once from OnInit)
+void DashCreate()
+  {
+   string bg = DASH_PREFIX + "BG";
+   if(ObjectFind(0, bg) < 0)
+      ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, DASH_X0);
+   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, DASH_Y0);
+   ObjectSetInteger(0, bg, OBJPROP_XSIZE, 330);
+   ObjectSetInteger(0, bg, OBJPROP_YSIZE, DashY(19) - DASH_Y0 + 24);
+   ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, C'18,18,18');
+   ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bg, OBJPROP_COLOR, C'80,80,80');
+   ObjectSetInteger(0, bg, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, bg, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, bg, OBJPROP_BACK, false);
+
+   // Title
+   DashLabel(DASH_PREFIX + "TITLE", DASH_X0 + 10, DashY(0), 10, clrOrange);
+   DashSet(DASH_PREFIX + "TITLE", "Gold X9", clrOrange);
+   DashLabel(DASH_PREFIX + "BY", DASH_X0 + 88, DashY(0), DASH_SIZE, clrWhite);
+   DashSet(DASH_PREFIX + "BY", "by AIT CHIKH MUSTAPHA", clrWhite);
+
+   // Summary rows 1..7
+   string keys[7] = {"Status", "Trade frequency", "Account balance", "Max allowed DD",
+                     "Max DD (Equity)", "Open P/L", "Total P/L"};
+   for(int r = 0; r < 7; r++)
+     {
+      DashLabel(DASH_PREFIX + "K" + IntegerToString(r), DASH_X0 + 10, DashY(r + 1), DASH_SIZE, clrSilver);
+      DashSet(DASH_PREFIX + "K" + IntegerToString(r), keys[r], clrSilver);
+      DashLabel(DASH_PREFIX + "V" + IntegerToString(r), DASH_X0 + 150, DashY(r + 1), DASH_SIZE, clrWhite);
+     }
+
+   // Table header (row 9) and strategy rows (10..18), total (19)
+   DashLabel(DASH_PREFIX + "HDR", DASH_X0 + 10, DashY(9), DASH_SIZE, clrSilver);
+   DashSet(DASH_PREFIX + "HDR", StringFormat("%-11s%6s%10s%9s%6s", "Strategy", "Trades", "Closed", "Per trd", "Lots"), clrSilver);
+   for(int i = 0; i < STRATEGY_COUNT; i++)
+      DashLabel(DASH_PREFIX + "T" + IntegerToString(i), DASH_X0 + 10, DashY(10 + i), DASH_SIZE, clrWhite);
+   DashLabel(DASH_PREFIX + "TOT", DASH_X0 + 10, DashY(19), DASH_SIZE, clrWhite);
+   ChartRedraw(0);
+  }
+
+// Recalculates every value on the panel
+void DashUpdate()
+  {
+   double openPL = 0.0;
+   double openLots[STRATEGY_COUNT];
+   double closedPL[STRATEGY_COUNT];
+   int    trades[STRATEGY_COUNT];
+   ArrayInitialize(openLots, 0.0);
+   ArrayInitialize(closedPL, 0.0);
+   ArrayInitialize(trades, 0);
+
+   // Open positions of this EA on this symbol
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0) continue;
+      if(!IsEAPosition()) continue;
+      int idx = (int)(PositionGetInteger(POSITION_MAGIC) - (long)InpMagic);
+      openLots[idx] += PositionGetDouble(POSITION_VOLUME);
+      openPL += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+     }
+
+   // Closed deals of this EA: trade counts, closed P/L, and trade frequency (last 7 days)
+   double totalPL = 0.0;
+   int    recentTrades = 0;
+   datetime now = TimeCurrent();
+   if(HistorySelect(0, now))
+     {
+      int n = HistoryDealsTotal();
+      for(int i = 0; i < n; i++)
+        {
+         ulong tk = HistoryDealGetTicket(i);
+         if(tk == 0) continue;
+         if(HistoryDealGetString(tk, DEAL_SYMBOL) != _Symbol) continue;
+         long magic = HistoryDealGetInteger(tk, DEAL_MAGIC);
+         if(!IsEAMagic(magic)) continue;
+         int idx = (int)(magic - (long)InpMagic);
+
+         double pl = HistoryDealGetDouble(tk, DEAL_PROFIT)
+                   + HistoryDealGetDouble(tk, DEAL_COMMISSION)
+                   + HistoryDealGetDouble(tk, DEAL_SWAP);
+         closedPL[idx] += pl;
+         totalPL += pl;
+
+         long entry = HistoryDealGetInteger(tk, DEAL_ENTRY);
+         if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+           {
+            trades[idx]++;
+            if(now - (datetime)HistoryDealGetInteger(tk, DEAL_TIME) <= 7 * 86400) recentTrades++;
+           }
+        }
+     }
+
+   double perDay = recentTrades / 7.0;
+   string freq = (perDay < 1.0) ? "Low" : (perDay <= 5.0 ? "Moderate" : "High");
+
+   // Status
+   bool anyOn = false;
+   for(int i = 0; i < STRATEGY_COUNT; i++)
+      if(g_cfg[i].enabled) anyOn = true;
+   string status = "Trading active";
+   color  statusClr = clrLime;
+   if(g_maxDDHalt)      { status = "Halted: max DD";       statusClr = clrTomato; }
+   else if(g_dayHalt)   { status = "Halted: daily DD";     statusClr = clrTomato; }
+   else if(!anyOn)      { status = "No sub-strategy on";   statusClr = clrOrange; }
+
+   DashSet(DASH_PREFIX + "V0", status, statusClr);
+   DashSet(DASH_PREFIX + "V1", StringFormat("%s (%.1f/day)", freq, perDay), clrWhite);
+   DashSet(DASH_PREFIX + "V2", StringFormat("%.2f", AccountInfoDouble(ACCOUNT_BALANCE)), clrWhite);
+   DashSet(DASH_PREFIX + "V3", StringFormat("%.1f%%", MaxDrawdownCapPct), clrOrange);
+   DashSet(DASH_PREFIX + "V4", StringFormat("%.1f%%", g_worstDDPct), clrWhite);
+   DashSet(DASH_PREFIX + "V5", StringFormat("%.2f", openPL), openPL >= 0.0 ? clrLime : clrTomato);
+   DashSet(DASH_PREFIX + "V6", StringFormat("%.2f", totalPL), totalPL >= 0.0 ? clrLime : clrTomato);
+
+   // Per-strategy table and totals
+   double sumClosed = 0.0, sumLots = 0.0;
+   int    sumTrades = 0;
+   for(int i = 0; i < STRATEGY_COUNT; i++)
+     {
+      double perTrd = (trades[i] > 0) ? closedPL[i] / trades[i] : 0.0;
+      color  clr = g_cfg[i].enabled ? (closedPL[i] < 0.0 ? clrTomato : clrWhite) : clrGray;
+      DashSet(DASH_PREFIX + "T" + IntegerToString(i),
+              StringFormat("%-11s%6d%10.2f%9.2f%6.2f", "Strategy " + IntegerToString(i + 1),
+                           trades[i], closedPL[i], perTrd, openLots[i]), clr);
+      sumTrades += trades[i];
+      sumClosed += closedPL[i];
+      sumLots   += openLots[i];
+     }
+   double totPerTrd = (sumTrades > 0) ? sumClosed / sumTrades : 0.0;
+   DashSet(DASH_PREFIX + "TOT",
+           StringFormat("%-11s%6d%10.2f%9.2f%6.2f", "Total", sumTrades, sumClosed, totPerTrd, sumLots),
+           clrWhite);
+   ChartRedraw(0);
+  }
+
 int OnInit()
   {
    if(fractalLeft < 1 || fractalRight < 1)
@@ -908,12 +1091,20 @@ int OnInit()
 
    Print(StringFormat("Gold X9 V6.3 started on %s. Magic %d-%d. Active sub-strategies: %d/9",
                       _Symbol, InpMagic, InpMagic + STRATEGY_COUNT - 1, active));
+   if(ShowDashboard)
+     {
+      DashCreate();
+      DashUpdate();
+      EventSetTimer(1);
+     }
    return INIT_SUCCEEDED;
   }
 
 void OnDeinit(const int reason)
   {
    // Open positions and pending orders are left in place. Their SL/TP live on the broker side.
+   EventKillTimer();
+   ObjectsDeleteAll(0, DASH_PREFIX);
    Print("Gold X9 V6.3 stopped, reason code ", reason);
   }
 
@@ -957,5 +1148,16 @@ void OnTick()
       if(trading && (newFractal || newRescanBar))
          PlaceOrders(i);
      }
+
+   if(ShowDashboard && TimeCurrent() - g_dashLast >= 1)
+     {
+      g_dashLast = TimeCurrent();
+      DashUpdate();
+     }
+  }
+
+void OnTimer()
+  {
+   if(ShowDashboard) DashUpdate();
   }
 //+------------------------------------------------------------------+
