@@ -652,6 +652,15 @@ void TryPlaceStop(const int idx, const bool isBuy, const double swingLevel, cons
      }
 
 
+   // Free-margin guard (same idea as the MQ4 port): do not open a new order if the broker
+   // would not have enough free margin for it. Stops the account being margin-called.
+   double neededMargin = 0.0;
+   if(OrderCalcMargin(otype, _Symbol, lots, entry, neededMargin) && neededMargin > 0.0)
+     {
+      if(neededMargin > AccountInfoDouble(ACCOUNT_MARGIN_FREE))
+         return;
+     }
+
    g_trade.SetExpertMagicNumber((ulong)c.magicNumber);
    string cmt = StringFormat("%s S%d", TradeComment, c.strategyId);
 
