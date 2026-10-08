@@ -15,6 +15,8 @@
 //     break-even, salvage).
 //   - Swing high/low fractals are detected on each sub-strategy's own timeframe.
 //   - Sub-strategy i uses magic number InpMagic + i (i = 0..8).
+//   - Small-account mode (default on): trades the minimum lot and tightens the SL so a loss
+//     equals SmallRiskPct of balance. Entries, TP and trailing/BE rules are unchanged.
 //   - Prop-firm guards: daily equity stop, max peak-to-trough equity stop,
 //     pending order expiry, and optional micro-offset randomizer.
 //+------------------------------------------------------------------+
@@ -56,6 +58,10 @@ input double   FixedLots          = 0.01;    // Fixed Lots
 input double   RiskScaling        = 1.0;     // Risk Scaling Factor (% of balance per trade, Risk % mode)
 input bool     EnableRandomizer   = true;    // Random +/- 0.1-0.3 point micro-offsets (prop firm)
 input bool     VerboseLog         = false; // Print daily-reset messages to the Experts log
+
+input group " === SMALL ACCOUNT MODE (e.g. $200 on Raw Spread) === "
+input bool     SmallAccountMode   = true;   // Trade the minimum lot and tighten the SL to the risk budget below
+input double   SmallRiskPct       = 1.0;    // Max loss per trade (% of balance) when SmallAccountMode is on
 
 input group " === PROP FIRM SAFETY === "
 input double   DailyDrawdownCapPct = 2.5;    // Daily equity drawdown hard stop (%): closes all positions
@@ -246,6 +252,15 @@ bool HasNearPending(const int idx, const ENUM_ORDER_TYPE side, const double pric
       if(MathAbs(OrderGetDouble(ORDER_PRICE_OPEN) - price) <= dist) return true;
      }
    return false;
+  }
+
+// Loss (positive money) for 'vol' lots from entry to sl. Returns false if the broker calc fails.
+bool LossAtPrice(const ENUM_ORDER_TYPE otype, const double vol, const double entry, const double sl, double &loss)
+  {
+   double p = 0.0;
+   if(!OrderCalcProfit(otype, _Symbol, vol, entry, sl, p)) return false;
+   loss = MathAbs(p);
+   return true;
   }
 
 // Random micro-offset in price units: +/- (0.1 .. 0.3) points
@@ -538,7 +553,36 @@ void TryPlaceStop(const int idx, const bool isBuy, const double swingLevel, cons
    double tp = NormalizeDouble((isBuy ? entry + tpDist : entry - tpDist) + RandomOffset(), _Digits);
    if(!IsValidSL(isBuy, entry, sl) || !IsValidTP(isBuy, entry, tp)) return;
 
-   double lots = CalcLots(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, entry, sl, CalcWeight(idx));
+   ENUM_ORDER_TYPE otype = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double lots = 0.0;
+   if(SmallAccountMode)
+     {
+      // Trade the minimum lot. If one stop-out at this SL costs more than the budget,
+      // move the SL closer (linear in distance) so the loss equals the budget.
+      lots = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double budget = AccountInfoDouble(ACCOUNT_BALANCE) * SmallRiskPct / 100.0;
+      double lossAtSL = 0.0;
+      if(!LossAtPrice(otype, lots, entry, sl, lossAtSL)) return;
+      if(budget <= 0.0) return;
+      if(lossAtSL > budget)
+        {
+         double k       = budget / lossAtSL;
+         double newDist = MathAbs(entry - sl) * k;
+         double spread  = ask - bid;
+         if(newDist < g_stopLevel || newDist < 2.0 * spread)
+           {
+            Print(StringFormat("Gold X9 S%d skipped: small-account stop %.2f would be inside the spread/stop level.",
+                               c.strategyId, newDist));
+            return;
+           }
+         sl = NormalizeDouble(isBuy ? entry - newDist : entry + newDist, _Digits);
+         if(!IsValidSL(isBuy, entry, sl)) return;
+        }
+     }
+   else
+     {
+      lots = CalcLots(otype, entry, sl, CalcWeight(idx));
+     }
    if(lots <= 0.0) return;
 
    g_trade.SetExpertMagicNumber((ulong)c.magicNumber);
@@ -764,6 +808,17 @@ int OnInit()
       return INIT_FAILED;
      }
    g_stopLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * g_point;
+
+   if(!SmallAccountMode)
+     {
+      double px  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double vol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+      double loss = 0.0;
+      if(px > 0.0 && bal > 0.0 && LossAtPrice(ORDER_TYPE_BUY, vol, px, px * (1.0 - slPct / 100.0), loss) && loss > bal * 0.02)
+         Print(StringFormat("Gold X9 WARNING: at minimum lot %.2f a stop-loss costs %.2f (%.1f%% of balance %.2f). "
+                            "Enable SmallAccountMode or use a larger balance.", vol, loss, loss / bal * 100.0, bal));
+     }
 
    g_tierLevel = TieredLot;
    if(g_tierLevel > 100.0) g_tierLevel = 100.0;
